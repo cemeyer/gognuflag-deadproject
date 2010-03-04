@@ -5,9 +5,14 @@ The gognuflag library provides a programmatically similar interface similar
 to the built-in 'flag' package, except the flag and command-line semantics
 are identical to those of GNU getopt_long().
 
-It is released under a GPLv3+ license.
-
 Building
 ========
 
 Just run 'make'.
+
+Licensing
+=========
+
+Currently, gognuflag is released under a GPLv3+ license. If this would be
+more useful to you under another license, drop me an email and I may be
+willing to consider relicensing.
