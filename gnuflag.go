@@ -534,7 +534,9 @@ func (f *allFlags) parseOne(index int) (ok bool, next int) {
 				continue
 			}
 			has_value := false
-			if rest != "" { has_value = true }
+			if rest != "" {
+				has_value = true
+			}
 			if !has_value && index < len(os.Args)-1 {
 				has_value = true
 				index++
