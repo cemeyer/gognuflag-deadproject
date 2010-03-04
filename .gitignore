@@ -2,3 +2,6 @@
 *.6
 *.8
 _obj/
+6.out
+8.out
+_test/
