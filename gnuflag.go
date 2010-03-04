@@ -1,17 +1,17 @@
 /*
 	gnuflag - A 'flag'-like package for handling GNU-style program options
 	Copyright (C) 2010  Conrad Meyer <cemeyer@cs.washington.edu>
-	
+
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
 	the Free Software Foundation, either version 3 of the License, or
 	(at your option) any later version.
-	
+
 	This program is distributed in the hope that it will be useful,
 	but WITHOUT ANY WARRANTY; without even the implied warranty of
 	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 	GNU General Public License for more details.
-	
+
 	You should have received a copy of the GNU General Public License
 	along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
@@ -19,20 +19,19 @@
 /*
 	The gnuflag package implements command-line flag parsing.
 
-	TODO update docs:
 	Usage:
 
 	1) Define flags using flag.String(), Bool(), Int(), etc. Example:
-		import "flag"
-		var ip *int = flag.Int("flagname", 1234, "help message for flagname")
+		import "gnuflag"
+		var ip *int = gnuflag.Int("f", "flagname", 1234, "help message for flagname")
 	If you like, you can bind the flag to a variable using the Var() functions.
 		var flagvar int
 		func init() {
-			flag.IntVar(&flagvar, "flagname", 1234, "help message for flagname")
+			gnuflag.IntVar(&flagvar, "f", "flagname", 1234, "help message for flagname")
 		}
 
 	2) After all flags are defined, call
-		flag.Parse()
+		gnuflag.Parse()
 	to parse the command line into the defined flags.
 
 	3) Flags may then be used directly. If you're using the flags themselves,
@@ -40,22 +39,23 @@
 		fmt.Println("ip has value ", *ip);
 		fmt.Println("flagvar has value ", flagvar);
 
-	4) After parsing, flag.Arg(i) is the i'th argument after the flags.
-	Args are indexed from 0 up to flag.NArg().
+	4) After parsing, flag.Arg(i) is the i'th argument, excluding flags.
+	Args are indexed from 0 up to flag.NArg(). The flag.Args() function
+	provides a slice of all remaining arguments.
 
 	Command line flag syntax:
-		-flag
-		-flag=x
-		-flag x  // non-boolean flags only
-	One or two minus signs may be used; they are equivalent.
-	The last form is not permitted for boolean flags because the
-	meaning of the command
-		cmd -x *
-	will change if there is a file called 0, false, etc.  You must
-	use the -flag=false form to turn off a boolean flag.
+		-f
+		-fargument
+		-f argument
+		--flag
+		--flag=argument
+		--flag argument
+	Two minus signs must be used for the long-name options; a single
+	minus sign indicates a short-name option.
+	Some forms are not permitted for boolean flags; some forms are
+	not permitted for non-boolean flags. TODO: clarify.
 
-	Flag parsing stops just before the first non-flag argument
-	("-" is a non-flag argument) or after the terminator "--".
+	Flag parsing stops after the terminator "--".
 
 	Integer flags accept 1234, 0664, 0x1234 and may be negative.
 	Boolean flags may be 1, 0, t, f, true, false, TRUE, FALSE, True, False.
@@ -63,9 +63,11 @@
 package gnuflag
 
 import (
+	"container/vector"
 	"fmt"
 	"os"
 	"strconv"
+	"utf8"
 )
 
 // TODO(r): BUG: atob belongs elsewhere
@@ -230,21 +232,21 @@ type FlagValue interface {
 }
 
 // A Flag represents the state of a flag.
-// TODO: This will need to be fixed.
 type Flag struct {
-	Name     string    // name as it appears on command line
-	Usage    string    // help message
-	Value    FlagValue // value as set
-	DefValue string    // default value (as text); for usage message
+	Name      string    // name as it appears on command line
+	ShortName string    // shortname (optional)
+	Usage     string    // help message
+	Value     FlagValue // value as set
+	DefValue  string    // default value (as text); for usage message
 }
 
 type allFlags struct {
-	actual    map[string]*Flag
-	formal    map[string]*Flag
-	first_arg int // 0 is the program name, 1 is first arg
+	actual map[string]*Flag
+	formal map[string]*Flag
+	args   *vector.StringVector
 }
 
-var flags *allFlags = &allFlags{make(map[string]*Flag), make(map[string]*Flag), 1}
+var flags *allFlags = &allFlags{make(map[string]*Flag), make(map[string]*Flag), new([]string)}
 
 // VisitAll visits the flags, calling fn for each. It visits all flags, even those not set.
 func VisitAll(fn func(*Flag)) {
@@ -285,22 +287,31 @@ func Set(name, value string) bool {
 }
 
 // PrintDefaults prints to standard error the default values of all defined flags.
-// TODO: This will need to be changed.
 func PrintDefaults() {
 	VisitAll(func(f *Flag) {
-		format := "  -%s=%s: %s\n"
+		var format string
 		if _, ok := f.Value.(*stringValue); ok {
 			// put quotes on the value
-			format = "  -%s=%q: %s\n"
+			format = "--%s=%q: %s\n"
+		} else {
+			format = "--%s=%s: %s\n"
 		}
-		fmt.Fprintf(os.Stderr, format, f.Name, f.DefValue, f.Usage)
+		if f.ShortName != "" {
+			fmt.Fprintf(os.Stderr, "  -%s, "+format, f.ShortName, f.Name, f.DefValue, f.Usage)
+		} else {
+			fmt.Fprintf(os.Stderr, "      "+format, f.Name, f.DefValue, f.Usage)
+		}
 	})
 }
+
+// UsageTemplate is a string formatting template that can be overridden to provide
+// more useful usage messages. The %s argument is the program name.
+var UsageTemplate = "Usage: %s [OPTION]... [ARGS]\n"
 
 // Usage prints to standard error a default usage message documenting all defined flags.
 // The function is a variable that may be changed to point to a custom function.
 var Usage = func() {
-	fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, UsageTemplate, os.Args[0])
 	PrintDefaults()
 }
 
@@ -309,151 +320,156 @@ func NFlag() int { return len(flags.actual) }
 
 // Arg returns the i'th command-line argument.  Arg(0) is the first remaining argument
 // after flags have been processed.
-// TODO: Will need to be fixed.
 func Arg(i int) string {
-	i += flags.first_arg
-	if i < 0 || i >= len(os.Args) {
+	if i < 0 || i >= flags.args.Len() {
 		return ""
 	}
-	return os.Args[i]
+	return flags.args.At(i)
 }
 
 // NArg is the number of arguments remaining after flags have been processed.
-// TODO: fix.
-func NArg() int { return len(os.Args) - flags.first_arg }
+func NArg() int { return flags.args.Len() }
 
 // Args returns the non-flag command-line arguments.
-// TODO: fix.
-func Args() []string { return os.Args[flags.first_arg:] }
+func Args() []string { return flags.args.Data() }
 
-func add(name string, value FlagValue, usage string) {
+func add(name string, shortName string, value FlagValue, usage string) {
 	// Remember the default value as a string; it won't change.
-	f := &Flag{name, usage, value, value.String()}
+	f := &Flag{name, shortName, usage, value, value.String()}
 	_, alreadythere := flags.formal[name]
 	if alreadythere {
 		fmt.Fprintln(os.Stderr, "flag redefined:", name)
 		panic("flag redefinition") // Happens only if flags are declared with identical names
 	}
+	// Verify that shortName is the empty string, or a single UTF-8 character.
+	if shortName == "" {
+		goto noShortName
+	}
+	if r, n := utf8.DecodeRuneInString(shortName); r == utf8.RuneError || n < len(shortName) {
+		fmt.Fprintln(os.Stderr, "flag shortname invalid:", name)
+		panic("flag shortname invalid")
+	}
+noShortName:
 	flags.formal[name] = f
 }
 
-// BoolVar defines a bool flag with specified name, default value, and usage string.
-// The argument p points to a bool variable in which to store the value of the flag.
-// TODO: Fix all of these
-func BoolVar(p *bool, name string, value bool, usage string) {
-	add(name, newBoolValue(value, p), usage)
+// BoolVar defines a bool flag with specified name, short name, default value, and
+// usage string. The argument p points to a bool variable in which to store the value
+// of the flag.
+func BoolVar(p *bool, name, shortName string, value bool, usage string) {
+	add(name, shortName, newBoolValue(value, p), usage)
 }
 
-// Bool defines a bool flag with specified name, default value, and usage string.
+// Bool defines a bool flag with specified name, short name, default value, and usage string.
 // The return value is the address of a bool variable that stores the value of the flag.
-func Bool(name string, value bool, usage string) *bool {
+func Bool(name, shortName string, value bool, usage string) *bool {
 	p := new(bool)
-	BoolVar(p, name, value, usage)
+	BoolVar(p, name, shortName, value, usage)
 	return p
 }
 
 // IntVar defines an int flag with specified name, default value, and usage string.
 // The argument p points to an int variable in which to store the value of the flag.
-func IntVar(p *int, name string, value int, usage string) {
-	add(name, newIntValue(value, p), usage)
+func IntVar(p *int, name, shortName string, value int, usage string) {
+	add(name, shortName, newIntValue(value, p), usage)
 }
 
 // Int defines an int flag with specified name, default value, and usage string.
 // The return value is the address of an int variable that stores the value of the flag.
-func Int(name string, value int, usage string) *int {
+func Int(name, shortName string, value int, usage string) *int {
 	p := new(int)
-	IntVar(p, name, value, usage)
+	IntVar(p, name, shortName, value, usage)
 	return p
 }
 
 // Int64Var defines an int64 flag with specified name, default value, and usage string.
 // The argument p points to an int64 variable in which to store the value of the flag.
-func Int64Var(p *int64, name string, value int64, usage string) {
-	add(name, newInt64Value(value, p), usage)
+func Int64Var(p *int64, name, shortName string, value int64, usage string) {
+	add(name, shortName, newInt64Value(value, p), usage)
 }
 
 // Int64 defines an int64 flag with specified name, default value, and usage string.
 // The return value is the address of an int64 variable that stores the value of the flag.
-func Int64(name string, value int64, usage string) *int64 {
+func Int64(name, shortName string, value int64, usage string) *int64 {
 	p := new(int64)
-	Int64Var(p, name, value, usage)
+	Int64Var(p, name, shortName, value, usage)
 	return p
 }
 
 // UintVar defines a uint flag with specified name, default value, and usage string.
 // The argument p points to a uint variable in which to store the value of the flag.
-func UintVar(p *uint, name string, value uint, usage string) {
-	add(name, newUintValue(value, p), usage)
+func UintVar(p *uint, name, shortName string, value uint, usage string) {
+	add(name, shortName, newUintValue(value, p), usage)
 }
 
 // Uint defines a uint flag with specified name, default value, and usage string.
 // The return value is the address of a uint variable that stores the value of the flag.
-func Uint(name string, value uint, usage string) *uint {
+func Uint(name, shortName string, value uint, usage string) *uint {
 	p := new(uint)
-	UintVar(p, name, value, usage)
+	UintVar(p, name, shortName, value, usage)
 	return p
 }
 
 // Uint64Var defines a uint64 flag with specified name, default value, and usage string.
 // The argument p points to a uint64 variable in which to store the value of the flag.
-func Uint64Var(p *uint64, name string, value uint64, usage string) {
-	add(name, newUint64Value(value, p), usage)
+func Uint64Var(p *uint64, name, shortName string, value uint64, usage string) {
+	add(name, shortName, newUint64Value(value, p), usage)
 }
 
 // Uint64 defines a uint64 flag with specified name, default value, and usage string.
 // The return value is the address of a uint64 variable that stores the value of the flag.
-func Uint64(name string, value uint64, usage string) *uint64 {
+func Uint64(name, shortName string, value uint64, usage string) *uint64 {
 	p := new(uint64)
-	Uint64Var(p, name, value, usage)
+	Uint64Var(p, name, shortName, value, usage)
 	return p
 }
 
 // StringVar defines a string flag with specified name, default value, and usage string.
 // The argument p points to a string variable in which to store the value of the flag.
-func StringVar(p *string, name, value string, usage string) {
-	add(name, newStringValue(value, p), usage)
+func StringVar(p *string, name, shortName, value string, usage string) {
+	add(name, shortName, newStringValue(value, p), usage)
 }
 
 // String defines a string flag with specified name, default value, and usage string.
 // The return value is the address of a string variable that stores the value of the flag.
-func String(name, value string, usage string) *string {
+func String(name, shortName, value string, usage string) *string {
 	p := new(string)
-	StringVar(p, name, value, usage)
+	StringVar(p, name, shortName, value, usage)
 	return p
 }
 
 // FloatVar defines a float flag with specified name, default value, and usage string.
 // The argument p points to a float variable in which to store the value of the flag.
-func FloatVar(p *float, name string, value float, usage string) {
-	add(name, newFloatValue(value, p), usage)
+func FloatVar(p *float, name, shortName string, value float, usage string) {
+	add(name, shortName, newFloatValue(value, p), usage)
 }
 
 // Float defines a float flag with specified name, default value, and usage string.
 // The return value is the address of a float variable that stores the value of the flag.
-func Float(name string, value float, usage string) *float {
+func Float(name, shortName string, value float, usage string) *float {
 	p := new(float)
-	FloatVar(p, name, value, usage)
+	FloatVar(p, name, shortName, value, usage)
 	return p
 }
 
 // Float64Var defines a float64 flag with specified name, default value, and usage string.
 // The argument p points to a float64 variable in which to store the value of the flag.
-func Float64Var(p *float64, name string, value float64, usage string) {
-	add(name, newFloat64Value(value, p), usage)
+func Float64Var(p *float64, name, shortName string, value float64, usage string) {
+	add(name, shortName, newFloat64Value(value, p), usage)
 }
 
 // Float64 defines a float64 flag with specified name, default value, and usage string.
 // The return value is the address of a float64 variable that stores the value of the flag.
-func Float64(name string, value float64, usage string) *float64 {
+func Float64(name, shortName string, value float64, usage string) *float64 {
 	p := new(float64)
-	Float64Var(p, name, value, usage)
+	Float64Var(p, name, shortName, value, usage)
 	return p
 }
 
 
 func (f *allFlags) parseOne(index int) (ok bool, next int) {
 	s := os.Args[index]
-	f.first_arg = index // until proven otherwise
+	//f.first_arg = index // until proven otherwise
 	if len(s) == 0 {
 		return false, -1
 	}
@@ -541,7 +557,6 @@ func Parse() {
 	for i := 1; i < len(os.Args); {
 		ok, next := flags.parseOne(i)
 		if next > 0 {
-			flags.first_arg = next
 			i = next
 		}
 		if !ok {
