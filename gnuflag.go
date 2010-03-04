@@ -300,6 +300,12 @@ func Set(name, value string) bool {
 	return true
 }
 
+// Reset prepares gnuflag to parse the arg list again. It is mostly for testing
+// purposes.
+func Reset() {
+	flags = &allFlags{make(map[string]*Flag), make(map[string]*Flag), make(map[int]string), new([]string)}
+}
+
 // PrintDefaults prints to standard error the default values of all defined flags.
 func PrintDefaults() {
 	VisitAll(func(f *Flag) {
@@ -507,18 +513,18 @@ func (f *allFlags) parseOne(index int) (ok bool, next int) {
 			}
 			name, ok := f.snames[sname]
 			if !ok {
-				errorStr = fmt.Sprintf("flag provided but not defined: -%s\n", sname)
+				errorStr = fmt.Sprintf("flag provided but not defined: -%s\n", string(sname))
 				goto argError
 			}
 			rest := s[1+sz:]
 			// Check for (bad) extraneous flags
 			if _, ok := f.actual[name]; ok {
-				errorStr = fmt.Sprintf("flag specified twice: -%s\n", name)
+				errorStr = fmt.Sprintf("flag specified twice: -%s\n", string(sname))
 				goto argError
 			}
 			flag, ok := f.formal[name]
 			if !ok {
-				errorStr = fmt.Sprintf("flag provided but not defined: -%s\n", name)
+				errorStr = fmt.Sprintf("flag provided but not defined: -%s\n", string(sname))
 				goto argError
 			}
 			// Try and understand the value of the flag
@@ -535,11 +541,11 @@ func (f *allFlags) parseOne(index int) (ok bool, next int) {
 				rest = os.Args[index]
 			}
 			if !has_value {
-				errorStr = fmt.Sprintf("flag needs an argument: -%s\n", name)
+				errorStr = fmt.Sprintf("flag needs an argument: -%s\n", string(sname))
 				goto argError
 			}
 			if ok = flag.Value.set(rest); !ok {
-				errorStr = fmt.Sprintf("invalid value %s for flag: -%s\n", rest, name)
+				errorStr = fmt.Sprintf("invalid value %s for flag: -%s\n", rest, string(sname))
 				goto argError
 			}
 			break
