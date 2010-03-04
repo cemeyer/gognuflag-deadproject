@@ -50,10 +50,23 @@
 		--flag
 		--flag=argument
 		--flag argument
+
 	Two minus signs must be used for the long-name options; a single
 	minus sign indicates a short-name option.
-	Some forms are not permitted for boolean flags; some forms are
-	not permitted for non-boolean flags. TODO: clarify.
+
+	Boolean flags can be composed (setting a value of true), e.g.:
+		-pzF
+	is identical to:
+		-p -z -F
+
+	Other-valued flags may not be composed. They look like:
+		-x foo
+	or:
+		-xfoo
+
+	The only way to set a boolean flag to false is to use the long form
+	and 'flag=value' notation, i.e.:
+		--foobar=false
 
 	Flag parsing stops after the terminator "--".
 
@@ -243,10 +256,11 @@ type Flag struct {
 type allFlags struct {
 	actual map[string]*Flag
 	formal map[string]*Flag
+	snames map[int]string
 	args   *vector.StringVector
 }
 
-var flags *allFlags = &allFlags{make(map[string]*Flag), make(map[string]*Flag), new([]string)}
+var flags *allFlags = &allFlags{make(map[string]*Flag), make(map[string]*Flag), make(map[int]string), new([]string)}
 
 // VisitAll visits the flags, calling fn for each. It visits all flags, even those not set.
 func VisitAll(fn func(*Flag)) {
@@ -345,10 +359,12 @@ func add(name string, shortName string, value FlagValue, usage string) {
 	if shortName == "" {
 		goto noShortName
 	}
-	if r, n := utf8.DecodeRuneInString(shortName); r == utf8.RuneError || n < len(shortName) {
+	r, n := utf8.DecodeRuneInString(shortName)
+	if r == utf8.RuneError || n < len(shortName) {
 		fmt.Fprintln(os.Stderr, "flag shortname invalid:", name)
 		panic("flag shortname invalid")
 	}
+	flags.snames[r] = name
 noShortName:
 	flags.formal[name] = f
 }
@@ -469,97 +485,136 @@ func Float64(name, shortName string, value float64, usage string) *float64 {
 
 func (f *allFlags) parseOne(index int) (ok bool, next int) {
 	s := os.Args[index]
-	//f.first_arg = index // until proven otherwise
-	if len(s) == 0 {
+	// Take care of non-flag arguments.
+	if len(s) == 0 || s[0] != '-' || s == "-" {
+		f.args.Push(s)
+		return true, index + 1
+	}
+	if s == "--" {
+		v := vector.StringVector(os.Args[index+1:])
+		f.args.AppendVector(&v)
 		return false, -1
 	}
-	if s[0] != '-' {
-		return false, -1
-	}
-	num_minuses := 1
-	if len(s) == 1 {
-		return false, index
-	}
-	if s[1] == '-' {
-		num_minuses++
-		if len(s) == 2 { // "--" terminates the flags
-			return false, index + 1
-		}
-	}
-	name := s[num_minuses:]
-	if len(name) == 0 || name[0] == '-' || name[0] == '=' {
-		fmt.Fprintln(os.Stderr, "bad flag syntax:", s)
-		Usage()
-		os.Exit(2)
-	}
-
-	// it's a flag. does it have an argument?
-	has_value := false
-	value := ""
-	for i := 1; i < len(name); i++ { // equals cannot be first
-		if name[i] == '=' {
-			value = name[i+1:]
-			has_value = true
-			name = name[0:i]
+	var errorStr string
+	// Sort out flag arguments.
+	if s[1] != '-' {
+		for {
+			// Deal with shortname flags
+			sname, sz := utf8.DecodeRuneInString(s[1:])
+			if sname == utf8.RuneError {
+				errorStr = "invalid UTF-8 character"
+				goto argError
+			}
+			name, ok := f.snames[sname]
+			if !ok {
+				errorStr = fmt.Sprintf("flag provided but not defined: -%s\n", sname)
+				goto argError
+			}
+			rest := s[1+sz:]
+			// Check for (bad) extraneous flags
+			if _, ok := f.actual[name]; ok {
+				errorStr = fmt.Sprintf("flag specified twice: -%s\n", name)
+				goto argError
+			}
+			flag, ok := f.formal[name]
+			if !ok {
+				errorStr = fmt.Sprintf("flag provided but not defined: -%s\n", name)
+				goto argError
+			}
+			// Try and understand the value of the flag
+			if f, ok := flag.Value.(*boolValue); ok { // special case: doesn't need an arg
+				f.set("true")
+				s = "-" + rest
+				continue
+			}
+			has_value := false
+			if rest != "" { has_value = true }
+			if !has_value && index < len(os.Args)-1 {
+				has_value = true
+				index++
+				rest = os.Args[index]
+			}
+			if !has_value {
+				errorStr = fmt.Sprintf("flag needs an argument: -%s\n", name)
+				goto argError
+			}
+			if ok = flag.Value.set(rest); !ok {
+				errorStr = fmt.Sprintf("invalid value %s for flag: -%s\n", rest, name)
+				goto argError
+			}
 			break
 		}
-	}
-	flag, alreadythere := flags.actual[name]
-	if alreadythere {
-		fmt.Fprintf(os.Stderr, "flag specified twice: -%s\n", name)
-		Usage()
-		os.Exit(2)
-	}
-	m := flags.formal
-	flag, alreadythere = m[name] // BUG
-	if !alreadythere {
-		fmt.Fprintf(os.Stderr, "flag provided but not defined: -%s\n", name)
-		Usage()
-		os.Exit(2)
-	}
-	if f, ok := flag.Value.(*boolValue); ok { // special case: doesn't need an arg
-		if has_value {
-			if !f.set(value) {
-				fmt.Fprintf(os.Stderr, "invalid boolean value %t for flag: -%s\n", value, name)
-				Usage()
-				os.Exit(2)
+	} else {
+		// Long name flags
+		name := s[2:]
+		if name[0] == '-' || name[0] == '=' {
+			errorStr = fmt.Sprintln("bad flag syntax:", s)
+			goto argError
+		}
+		has_value := false
+		value := ""
+		for i, rune := range name {
+			if rune == '=' {
+				value = name[i+1:] // the '=' rune has len 1
+				has_value = true
+				name = name[0:i]
+				break
+			}
+		}
+		// Check for (bad) extraneous flags
+		if _, ok := f.actual[name]; ok {
+			errorStr = fmt.Sprintf("flag specified twice: -%s\n", name)
+			goto argError
+		}
+		flag, ok := f.formal[name]
+		if !ok {
+			errorStr = fmt.Sprintf("flag provided but not defined: -%s\n", name)
+			goto argError
+		}
+		// Try and understand the value of the flag
+		if f, ok := flag.Value.(*boolValue); ok { // special case: doesn't need an arg
+			if has_value {
+				if !f.set(value) {
+					errorStr = fmt.Sprintf("invalid boolean value %t for flag: -%s\n", value, name)
+					goto argError
+				}
+			} else {
+				f.set("true")
 			}
 		} else {
-			f.set("true")
+			// It must have a value, which might be the next argument.
+			if !has_value && index < len(os.Args)-1 {
+				// value is the next arg
+				has_value = true
+				index++
+				value = os.Args[index]
+			}
+			if !has_value {
+				errorStr = fmt.Sprintf("flag needs an argument: -%s\n", name)
+				goto argError
+			}
+			if ok = flag.Value.set(value); !ok {
+				errorStr = fmt.Sprintf("invalid value %s for flag: -%s\n", value, name)
+				goto argError
+			}
 		}
-	} else {
-		// It must have a value, which might be the next argument.
-		if !has_value && index < len(os.Args)-1 {
-			// value is the next arg
-			has_value = true
-			index++
-			value = os.Args[index]
-		}
-		if !has_value {
-			fmt.Fprintf(os.Stderr, "flag needs an argument: -%s\n", name)
-			Usage()
-			os.Exit(2)
-		}
-		ok = flag.Value.set(value)
-		if !ok {
-			fmt.Fprintf(os.Stderr, "invalid value %s for flag: -%s\n", value, name)
-			Usage()
-			os.Exit(2)
-		}
+		f.actual[name] = flag
 	}
-	flags.actual[name] = flag
 	return true, index + 1
+argError:
+	fmt.Fprint(os.Stderr, errorStr)
+	Usage()
+	os.Exit(2)
+	return false, -1
 }
 
 // Parse parses the command-line flags.  Must be called after all flags are defined
 // and before any are accessed by the program.
 func Parse() {
-	for i := 1; i < len(os.Args); {
-		ok, next := flags.parseOne(i)
-		if next > 0 {
-			i = next
-		}
-		if !ok {
+	var ok bool
+	var next int
+	for i := 1; i < len(os.Args); i = next {
+		if ok, next = flags.parseOne(i); !ok {
 			break
 		}
 	}
