@@ -618,9 +618,8 @@ argError:
 // and before any are accessed by the program.
 func Parse() {
 	var ok bool
-	var next int
-	for i := 1; i < len(os.Args); i = next {
-		if ok, next = flags.parseOne(i); !ok {
+	for i := 1; i < len(os.Args); {
+		if ok, i = flags.parseOne(i); !ok {
 			break
 		}
 	}
