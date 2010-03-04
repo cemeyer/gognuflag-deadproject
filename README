@@ -1,0 +1,3 @@
+The gognuflag library provides a programmatically similar interface similar
+to the built-in 'flag' package, except the flag and command-line semantics
+are identical to those of GNU getopt_long().
