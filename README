@@ -1,6 +1,9 @@
 About
 =====
 
+Note: This project hasn't been updated / used by the author in years. Assume
+bitrot, abandoned, etc. I'm just leaving it up for posterity...
+
 The gognuflag library provides a programmatically similar interface
 to the built-in 'flag' package, except the flag and command-line semantics
 are identical to those of GNU getopt_long().
